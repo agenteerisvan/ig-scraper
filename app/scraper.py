@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import traceback
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from .config import (
@@ -19,95 +20,182 @@ USER_AGENT = (
 
 
 # ──────────────────────────────────────────────
-#  SESSÃO / COOKIES
+#  SESSÃO / LOGIN
 # ──────────────────────────────────────────────
 
-async def create_context(context: BrowserContext) -> None:
-    """Aplica user-agent e viewport padrão ao context."""
-    await context.set_default_timeout(PAGE_TIMEOUT)
+async def _dismiss_popup(page: Page) -> None:
+    """Fecha popups comuns do Instagram (Not now, cookies, etc)."""
+    for selector in [
+        'button:has-text("Not now")',
+        'button:has-text("Agora n\xe3o")',
+        'button:has-text("\xd8\x62\xcc\xac\xb0\x80 \xcc\x87\xcc\xb0")',  # fallback
+        '[aria-label="Dismiss"]',
+    ]:
+        try:
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                await page.wait_for_timeout(500)
+                break
+        except Exception:
+            pass
+
+
+async def _ensure_logged_in(page: Page) -> bool:
+    """Verifica se estamos logados olhando elementos da home."""
+    try:
+        # Se aparecer link de login, não estamos logados
+        login_link = page.locator('a[href="/accounts/login/"]').first
+        if await login_link.is_visible(timeout=3000):
+            return False
+        # Se aparecer o grid de posts ou sidebar, estamos ok
+        home_el = page.locator('nav[aria-label="Feed"], div[data-test-id="react-root"] >> nth=0')
+        if await home_el.count() > 0:
+            return True
+        return True  # Sem erro, assume logado
+    except Exception:
+        return True
 
 
 async def login_ig(pw) -> BrowserContext:
     """Faz login no Instagram e retorna um context autenticado."""
-    browser = await pw.chromium.launch(headless=True)
+    logger.info("Lançando browser...")
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+        ],
+    )
     context = await browser.new_context(
         user_agent=USER_AGENT,
         viewport={"width": 1366, "height": 900},
         locale="pt-BR",
     )
-    await create_context(context)
+    await context.set_default_timeout(PAGE_TIMEOUT)
     page = await context.new_page()
 
-    logger.info("Navegando para login...")
-    await page.goto("https://www.instagram.com/accounts/login/", wait_until="domcontentloaded")
-    await page.wait_for_timeout(2000)
+    logger.info("Navegando para instagram.com/accounts/login...")
+    await page.goto(
+        "https://www.instagram.com/accounts/login/",
+        wait_until="domcontentloaded",
+        timeout=PAGE_TIMEOUT,
+    )
+    await page.wait_for_timeout(3000)
 
-    # Preenche credenciais
-    username_input = page.locator('input[name="username"]')
-    password_input = page.locator('input[name="password"]')
-    await username_input.fill(IG_USERNAME)
-    await password_input.fill(IG_PASSWORD)
-    await page.locator('button[type="submit"]').click()
+    # Verifica se já estava logado (cookies persistidos no browser)
+    if await _ensure_logged_in(page):
+        logger.info("Já autenticado (sessão existente no browser).")
+        await _dismiss_popup(page)
+        cookies = await context.cookies()
+        with open(COOKIES_FILE, "w") as f:
+            json.dump(cookies, f)
+        return context
 
-    # Aguarda redirecionamento
-    await page.wait_for_url("**/instagram.com/**", timeout=30000)
+    # Preenche formulário de login
+    logger.info("Preencrendo credenciais...")
+    await page.wait_for_selector('input[name="username"]', timeout=10000)
+    await page.fill('input[name="username"]', IG_USERNAME)
+    await page.wait_for_timeout(500)
+    await page.fill('input[name="password"]', IG_PASSWORD)
+    await page.wait_for_timeout(500)
+
+    logger.info("Clicando em Login...")
+    await page.click('button[type="submit"]')
+
+    # Aguarda navegação pós-login
+    await page.wait_for_load_state("networkidle", timeout=30000)
     await page.wait_for_timeout(3000)
 
     # Fecha popup "Not now" se aparecer
-    try:
-        btn = page.locator('button:has-text("Not now"), button:has-text("Agora não")').first
-        if await btn.is_visible(timeout=3000):
-            await btn.click()
-            await page.wait_for_timeout(1000)
-    except Exception:
-        pass
+    await _dismiss_popup(page)
 
-    # Salva cookies
+    # Verifica se funcionou
+    current_url = page.url
+    logger.info(f"URL após login: {current_url}")
+    
+    if "login" in current_url or "challenge" in current_url or "checkpoint" in current_url:
+        # Pode ter dado challenge (verificação por SMS/código)
+        page_content = await page.content()
+        raise RuntimeError(
+            f"Login incompleto. URL: {current_url}. "
+            "Pode ser necessário verificação extra (SMS/código). "
+            "Tente novamente ou troque de conta."
+        )
+
     cookies = await context.cookies()
     with open(COOKIES_FILE, "w") as f:
         json.dump(cookies, f)
-    logger.info(f"Sessão salva em {COOKIES_FILE}")
-
+    logger.info(f"Login OK. Cookies salvos ({len(cookies)} itens).")
     return context
 
 
-async def restore_context(pw) -> BrowserContext:
-    """Restaura sessão a partir de cookies salvos."""
-    browser = await pw.chromium.launch(headless=True)
-    context = await browser.new_context(
-        user_agent=USER_AGENT,
-        viewport={"width": 1366, "height": 900},
-        locale="pt-BR",
-    )
-    await create_context(context)
-
-    with open(COOKIES_FILE) as f:
-        cookies = json.load(f)
-    await context.add_cookies(cookies)
-
-    # Valida: abre instagram.com e confere se está logado
-    page = await context.new_page()
-    await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
-    await page.wait_for_timeout(2000)
-
-    # Se aparecer o botão de login, a sessão expirou
-    if page.locator('a[href="/accounts/login/"]').count() > 0:
+async def restore_from_cookies(pw) -> BrowserContext | None:
+    """Tenta restaurar sessão dos cookies salvos. Retorna None se falhar."""
+    if not COOKIES_FILE.exists():
+        return None
+    
+    try:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1366, "height": 900},
+            locale="pt-BR",
+        )
+        await context.set_default_timeout(PAGE_TIMEOUT)
+        
+        with open(COOKIES_FILE) as f:
+            cookies = json.load(f)
+        
+        # Formata cookies pro formato que Playwright espera
+        formatted_cookies = []
+        for c in cookies:
+            formatted_cookies.append({
+                "name": c.get("name", ""),
+                "value": c.get("value", ""),
+                "domain": c.get("domain", ".instagram.com"),
+                "path": c.get("path", "/"),
+                "secure": c.get("secure", True),
+                "httpOnly": c.get("httpOnly", False),
+                "sameSite": c.get("sameSite", "Lax"),
+            })
+        await context.add_cookies(formatted_cookies)
+        
+        page = await context.new_page()
+        await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+        await page.wait_for_timeout(3000)
+        
+        if await _ensure_logged_in(page):
+            logger.info("Sessão restaurada de cookies.")
+            return context
+        
+        # Não logado → fecha e retorna None
         await browser.close()
-        raise RuntimeError("Sessão expirada. Remova data/ig_cookies.json para re-fazer login.")
-
-    await page.close()
-    logger.info("Sessão restaurada com sucesso.")
-    return context
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Falha ao restaurar cookies: {e}")
+        try:
+            await browser.close()
+        except:
+            pass
+        return None
 
 
 async def get_authenticated_context(pw) -> BrowserContext:
-    """Retorna contexto autenticado (login ou restore)."""
+    """Retorna contexto autenticado (restaura cookies ou faz login)."""
+    # Tenta restaurar primeiro
+    context = await restore_from_cookies(pw)
+    if context:
+        return context
+    
+    # Senão, faz login
     if COOKIES_FILE.exists():
-        try:
-            return await restore_context(pw)
-        except RuntimeError:
-            logger.warning("Cookies inválidos, refazendo login...")
-            COOKIES_FILE.unlink(missing_ok=True)
+        COOKIES_FILE.unlink(missing_ok=True)
     return await login_ig(pw)
 
 
@@ -116,34 +204,42 @@ async def get_authenticated_context(pw) -> BrowserContext:
 # ──────────────────────────────────────────────
 
 async def get_followers_list(context: BrowserContext, username: str, max_followers: int | None = None) -> list[str]:
-    """
-    Abre o perfil do influencer, clica em 'Seguidores',
-    e coleta todos os @usernames via scroll.
-    """
+    """Abre perfil, clica em seguidores, coleta todos via scroll."""
     page = await context.new_page()
     profile_url = f"https://www.instagram.com/{username.lstrip('@')}/"
     
     logger.info(f"Abrindo perfil: {profile_url}")
-    await page.goto(profile_url, wait_until="domcontentloaded")
+    await page.goto(profile_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
     await page.wait_for_timeout(3000)
+    await _dismiss_popup(page)
 
-    # Fecha popup "Not now" se aparecer
-    try:
-        btn = page.locator('button:has-text("Not now"), button:has-text("Agora não")').first
-        if await btn.is_visible(timeout=2000):
-            await btn.click()
-            await page.wait_for_timeout(1000)
-    except Exception:
-        pass
-
-    # Clica no link de seguidores
-    followers_link = page.locator('a[href*="/followers"] span, span:has-text("seguidores") >> nth=0')
-    try:
-        await followers_link.first.click(timeout=5000)
-    except Exception:
-        # Tenta pelo texto diretamente
-        await page.locator('text=/\d+\s*(seguidores|followers)/i').first.click(timeout=5000)
+    # Tenta clicar no link de seguidores
+    clicked = False
+    for selector in [
+        'a[href$="/followers"] span',
+        'span:has-text("seguidores")',
+        'span:has-text("followers")',
+        'a[href*="/followers"]',
+    ]:
+        try:
+            el = page.locator(selector).first
+            if await el.is_visible(timeout=3000):
+                await el.click()
+                clicked = True
+                break
+        except Exception:
+            continue
     
+    if not clicked:
+        # Fallback: pega o número e tenta por texto
+        logger.warning("Não encontrou link de seguidores pelo seletor. Tentando texto...")
+        await page.locator('text=/\\d+\\s*(seguidores|followers)/i').first.click(timeout=5000)
+        clicked = True
+    
+    if not clicked:
+        raise RuntimeError("Não conseguiu abrir a lista de seguidores. Perfil pode estar privado ou bloqueado.")
+
+    # Aguarda dialog abrir
     await page.wait_for_selector('[role="dialog"]', timeout=10000)
     await page.wait_for_timeout(2000)
 
@@ -152,39 +248,45 @@ async def get_followers_list(context: BrowserContext, username: str, max_followe
     stagnant_count = 0
 
     while True:
-        # Coleta usernames visíveis
-        items = page.locator('[role="dialog"] a[href^="/"]:not([href="/"])')
-        count = await items.count()
+        # Coleta usernames dos links visíveis no dialog
+        links = page.locator('[role="dialog"] a[href^="/"]:not([href="/"]):not([href*="/explore"])')
+        count = await links.count()
         
         for i in range(count):
-            href = await items.nth(i).get_attribute("href")
-            if href:
-                tag = href.strip("/").split("/")[0]
-                if tag and tag != username.lower() and tag not in seen:
-                    seen.add(tag)
-                    followers.append(tag)
+            try:
+                href = await links.nth(i).get_attribute("href")
+                if href:
+                    tag = href.strip("/").split("/")[0].split("?")[0]
+                    if tag and tag.lower() != username.lower() and tag not in seen and len(tag) > 1:
+                        seen.add(tag)
+                        followers.append(tag)
+            except Exception:
+                continue
         
-        # Verifica se atingiu o máximo
+        # Check max
         if max_followers and len(followers) >= max_followers:
             followers = followers[:max_followers]
             break
         
         # Scroll dentro do dialog
         before = len(followers)
-        dialog = page.locator('[role="dialog"]')
-        await dialog.evaluate('el => el.scrollTo(0, el.scrollHeight)')
+        try:
+            dialog_el = page.locator('[role="dialog"]')
+            await dialog_el.evaluate('el => el.scrollTo(0, el.scrollHeight)')
+        except Exception:
+            await page.mouse.wheel(0, 1500)
+        
         await page.wait_for_timeout(2000)
         
         after = len(followers)
         if after == before:
             stagnant_count += 1
-            if stagnant_count >= 3:
+            if stagnant_count >= 5:
                 break
         else:
             stagnant_count = 0
         
-        # Progress
-        if len(followers) % 500 == 0:
+        if len(followers) % 500 == 0 and len(followers) > 0:
             logger.info(f"  ... {len(followers)} seguidores coletados")
 
     await page.close()
@@ -204,61 +306,97 @@ async def get_profile_info(context: BrowserContext, username: str) -> dict:
         "username": username,
         "name": "",
         "phone": None,
-        "bio_snippet": "",
         "private": False,
+        "bio_snippet": "",
         "error": None,
     }
 
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
         await page.wait_for_timeout(2000)
 
         # Detecta perfil privado
-        private_indicator = page.locator('text=/Esta conta é privada|This account is private/i')
-        if await private_indicator.count() > 0:
+        body_text = ""
+        try:
+            body_text = await page.evaluate("document.body.innerText || ''")
+        except Exception:
+            pass
+        
+        is_private = bool(
+            "conta é privada" in body_text.lower() or
+            "this account is private" in body_text.lower()
+        )
+        
+        if is_private:
             result["private"] = True
-            # Mesmo em perfil privado tenta pegar nome
-            name_el = page.locator('h1, [data-test-id="web-profile-name"]')
-            if await name_el.count() > 0:
-                result["name"] = (await name_el.first.inner_text()).strip()
+            # Tenta pegar pelo menos o nome
+            try:
+                h1 = page.locator("h1").first
+                if await h1.count() > 0:
+                    result["name"] = (await h1.inner_text()).strip()
+            except Exception:
+                pass
         
         else:
-            # Nome: h1 do perfil
-            name_el = page.locator('h1, [data-test-id="web-profile-name"]')
-            if await name_el.count() > 0:
-                result["name"] = (await name_el.first.inner_text()).strip()
+            # Nome
+            try:
+                name_el = page.locator("h1").first
+                if await name_el.count() > 0:
+                    result["name"] = (await name_el.inner_text()).strip()
+            except Exception:
+                pass
             
-            # Bio: seção abaixo do nome
-            # Tenta múltiplos seletores (Instagram muda HTML com frequência)
-            bio_selectors = [
-                'div[style*="white-space: pre-wrap"]',           # bio com quebras de linha
-                '[data-test-id="web-profile-bio-field"]',          # test-id
-                'section > div > div:nth-child(2) > div > div',   # fallback estrutural
-            ]
-            
+            # Bio — múltiplas estratégias
             bio_text = ""
-            for sel in bio_selectors:
-                el = page.locator(sel)
-                if await el.count() > 0:
-                    bio_text = (await el.first.inner_text()).strip()
-                    if bio_text:
-                        break
             
-            # Fallback: meta description (sempre presente)
-            if not bio_text:
+            # Estratégia 1: meta og:description
+            try:
                 meta = page.locator('meta[property="og:description"]')
                 if await meta.count() > 0:
-                    bio_text = (await meta.get_attribute("content")) or ""
-                    # og:description tem formato "X followers, Y following, Z posts - Bio text"
-                    parts = bio_text.split(" - ", 1)
-                    if len(parts) > 1:
-                        bio_text = parts[1]
+                    content = await meta.get_attribute("content")
+                    if content and " - " in content:
+                        bio_text = content.split(" - ", 1)[1]
+                    elif content:
+                        bio_text = content
+            except Exception:
+                pass
+            
+            # Estratégia 2: seletor direto
+            if not bio_text:
+                for sel in ['div[style*="white-space"]', '[data-test-id*="bio"]']:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.count() > 0:
+                            txt = (await el.inner_text()).strip()
+                            if txt:
+                                bio_text = txt
+                                break
+                    except Exception:
+                        continue
+            
+            # Estratégia 3: texto do corpo (busca seção entre nome e botões)
+            if not bio_text and body_text:
+                lines = body_text.split("\n")
+                # Bio geralmente aparece nas linhas após o username
+                in_bio = False
+                bio_lines = []
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped == username:
+                        in_bio = True
+                        continue
+                    if in_bio:
+                        if stripped in ("Seguir", "Follow", "Following", ""):
+                            break
+                        if stripped and not stripped.startswith("Follow"):
+                            bio_lines.append(stripped)
+                bio_text = " ".join(bio_lines)
             
             result["bio_snippet"] = bio_text[:200]
             result["phone"] = extract_phone(bio_text)
 
     except Exception as e:
-        result["error"] = str(e)[:200]
+        result["error"] = f"{type(e).__name__}: {str(e)[:150]}"
     finally:
         await page.close()
 
@@ -266,40 +404,42 @@ async def get_profile_info(context: BrowserContext, username: str) -> dict:
 
 
 # ──────────────────────────────────────────────
-#  ORQUESTRAÇÃO DE WORKERS
+#  ORQUESTRAÇÃO
 # ──────────────────────────────────────────────
 
 async def scrape_all_profiles(
-    pw, 
-    context: BrowserContext, 
+    context: BrowserContext,
     usernames: list[str],
-    delay: float | None = None,
-    max_workers: int | None = None,
+    delay: float = None,
+    max_workers: int = None,
     on_progress=None,
 ) -> list[dict]:
-    """
-    Processa todos os perfis com controle de concorrência.
-    Usa múltiplos contexts (browsers) para parallelizar.
-    """
+    """Processa perfis com controle de concorrência."""
     delay = delay or SCRAPE_DELAY
     max_workers = max_workers or MAX_WORKERS
-    results: list[dict] = []
     semaphore = asyncio.Semaphore(max_workers)
     total = len(usernames)
     done = 0
+    results = []
 
     async def process_one(username: str) -> dict:
         nonlocal done
         async with semaphore:
-            ctx = context
-            info = await get_profile_info(ctx, username)
+            info = await get_profile_info(context, username)
             done += 1
             if on_progress:
-                on_progress(done, total, info)
-            # Rate limit entre requests
+                try:
+                    on_progress(done, total, info)
+                except Exception:
+                    pass
             await asyncio.sleep(delay)
             return info
 
-    tasks = [process_one(u) for u in usernames]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    # Processa em lotes pra não criar milhares de tasks de uma vez
+    batch_size = 50
+    for i in range(0, total, batch_size):
+        batch = usernames[i:i + batch_size]
+        batch_results = await asyncio.gather(*[process_one(u) for u in batch])
+        results.extend(batch_results)
+
+    return results

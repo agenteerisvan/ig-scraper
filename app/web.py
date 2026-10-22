@@ -315,7 +315,7 @@ async def run_job(job_id: str, username: str, max_followers: int | None, delay: 
         # Encontra a linha do "File ... line ..." anterior pra contexto
         file_line = ""
         for i in range(len(lines)-1, -1, -1):
-            if "File "" in lines[i] or "File '" in lines[i]:
+            if "File" in lines[i] and "line" in lines[i]:
                 file_line = lines[i].strip() + " → " + (lines[i+1].strip() if i+1 < len(lines) else "")
                 break
         job["message"] = f"{last_line}\n\n{file_line}"

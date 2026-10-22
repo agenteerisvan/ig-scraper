@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IG Follower Scraper</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f0f14;color:#e0e0e0;min-height:100vh;display:flex;justify-content:center;padding:40px 16px}
+.container{width:100%;max-width:600px}
+.header{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.icon{width:40px;height:40px;background:#6366f1;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px}
+h1{font-size:1.5rem;font-weight:700}
+.subtitle{color:#888;font-size:0.9rem;margin-bottom:32px}
+.card{background:#1a1a24;border-radius:16px;padding:24px;margin-bottom:20px}
+label{display:block;color:#aaa;font-size:0.85rem;margin-bottom:6px}
+input[type=text],input[type=number]{width:100%;background:#12121a;border:1px solid #2a2a3a;border-radius:8px;padding:12px 14px;color:#fff;font-size:1rem;margin-bottom:16px;outline:none}
+input:focus{border-color:#6366f1}
+.row{display:flex;gap:12px}
+.row>div{flex:1}
+.btn{width:100%;background:#6366f1;color:#fff;border:none;border-radius:10px;padding:14px;font-size:1rem;font-weight:600;cursor:pointer;transition:background .2s}
+.btn:hover{background:#4f46e5}
+.btn:disabled{background:#444;cursor:not-allowed}
+.badge{display:inline-block;padding:4px 10px;border-radius:6px;font-size:.75rem;font-weight:700;text-transform:uppercase}
+.badge.pending{background:#333;color:#999}
+.badge.running{background:#6366f1;color:#fff}
+.badge.done{background:#10b981;color:#fff}
+.badge.error{background:#ef4444;color:#fff}
+.status-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.progress-bar{height:6px;background:#2a2a3a;border-radius:3px;overflow:hidden;margin-bottom:16px}
+.progress-fill{height:100%;background:#6366f1;border-radius:3px;transition:width .5s}
+.stats{display:flex;gap:16px;flex-wrap:wrap}
+.stat{display:flex;align-items:center;gap:6px;font-size:.85rem;color:#aaa}
+.stat span:first-child{font-size:1rem}
+.log-box{background:#12121a;border-radius:8px;padding:12px;font-family:monospace;font-size:.75rem;max-height:200px;overflow-y:auto;color:#888;line-height:1.6}
+.error-box{margin-top:12px;background:#1a0a0a;border:1px solid #ef4444;border-radius:8px;padding:12px;font-family:monospace;font-size:.75rem;color:#ef4444;white-space:pre-wrap}
+.download-btns{display:flex;gap:12px;margin-top:16px}
+.dl-btn{flex:1;text-align:center;padding:10px;background:#1a1a24;border:1px solid #10b981;border-radius:8px;color:#10b981;text-decoration:none;font-size:.85rem;font-weight:500}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header"><div class="icon">&#128241;</div><h1>IG Follower Scraper</h1></div>
+<p class="subtitle">Digite o @ do influencer e extraia nome + telefone dos seguidores.</p>
+<div class="card">
+<label>@ do Influencer</label>
+<input type=text id=username placeholder="ex: cr7" />
+<div class="row">
+<div><label>Max. seguidores</label><input type=number id=maxF placeholder="todos" min="1" /></div>
+<div><label>Pausa (seg)</label><input type=number id=delayV value="3" min="1" max="30" /></div>
+</div>
+<label>Código de verificação (só 1º login)</label>
+<input type=text id=challenge placeholder="Código p/ celular (deixe vazio se não pedir)" />
+<button class="btn" id=startBtn onclick="startScrape()">Iniciar Extracao</button>
+</div>
+<div class="card" id=statusCard style="display:none">
+<div class="status-row"><span class="badge pending" id=badge>AGUARDANDO</span><span id=pct>0%</span></div>
+<div class="progress-bar"><div class="progress-fill" id=fill style="width:0%"></div></div>
+<div class="stats">
+<div class="stat"><span>&#128222;</span><span>Telefones: <b id=phoneCount>0</b></span></div>
+<div class="stat"><span>&#128274;</span><span>Privados: <b id=privateCount>0</b></span></div>
+<div class="stat"><span>&#9201;</span><span>Tempo: <b id=timer>0s</b></span></div>
+</div>
+<div class="log-box" id=logBox></div>
+<div class="error-box" id=errorBox style="display:none"></div>
+<div class="download-btns" id=dlBtns style="display:none">
+<a class="dl-btn" id=dlAll href=#>&#11015; CSV Completo</a>
+<a class="dl-btn" id=dlPhone href=#>&#128222; So c/ Telefone</a>
+</div>
+</div>
+</div>
+<script>
+var jobId=null,pollId=null,t0=0;
+function startScrape(){
+var u=document.getElementById('username').value.trim().replace(/^@/,'');
+if(!u){alert('Digite o @');return}
+var max=parseInt(document.getElementById('maxF').value)||0;
+var delay=parseFloat(document.getElementById('delayV').value)||3;
+var ch=document.getElementById('challenge').value.trim();
+fetch('/api/scrape',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({username:u,max_followers:max,delay:delay,challenge_code:ch})
+}).then(function(r){return r.json()}).then(function(d){
+jobId=d.job_id;t0=Date.now();
+document.getElementById('startBtn').disabled=true;
+document.getElementById('statusCard').style.display='block';
+pollId=setInterval(pollStatus,2000);
+setInterval(function(){document.getElementById('timer').textContent=Math.floor((Date.now()-t0)/1000)+'s'},1000);
+}).catch(function(e){alert('Erro: '+e.message)});
+}
+function pollStatus(){
+if(!jobId)return;
+fetch('/api/status/'+jobId).then(function(r){return r.json()}).then(function(d){
+var p=d.total>0?Math.round(d.progress/d.total*100):0;
+document.getElementById('pct').textContent=p+'%';
+document.getElementById('fill').style.width=p+'%';
+document.getElementById('phoneCount').textContent=d.phones||0;
+document.getElementById('privateCount').textContent=d.privates||0;
+var lb=document.getElementById('logBox');lb.textContent=d.log||'';lb.scrollTop=99999;
+if(d.status==='running'){document.getElementById('badge').textContent=d.message||'RODANDO';document.getElementById('badge').className='badge running'}
+else if(d.status==='done'){document.getElementById('badge').textContent='CONCLUIDO';document.getElementById('badge').className='badge done';clearInterval(pollId);
+document.getElementById('dlBtns').style.display='flex';
+document.getElementById('dlAll').href='/api/download/'+jobId+'?file='+encodeURIComponent(d.csv||'');
+document.getElementById('dlPhone').href='/api/download/'+jobId+'?file='+encodeURIComponent(d.csv_phone||'');
+document.getElementById('startBtn').disabled=false}
+else if(d.status==='error'){document.getElementById('badge').textContent='ERRO';document.getElementById('badge').className='badge error';clearInterval(pollId);
+var msg=d.error||'';if(d.log_last_traceback){msg+='\n'+d.log_last_traceback.join('\n')}
+document.getElementById('errorBox').style.display='block';
+document.getElementById('errorBox').textContent=msg;
+document.getElementById('startBtn').disabled=false}
+}).catch(function(){clearInterval(pollId)});
+}
+</script>
+</body>
+</html>

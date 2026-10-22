@@ -1,0 +1,14 @@
+services:
+  scraper:
+    build: .
+    container_name: ig-scraper
+    ports:
+      - "8000:8000"          # Interface web → http://localhost:8000
+    env_file:
+      - .env
+    volumes:
+      - ./output:/app/output   # CSVs gerados
+      - ./data:/app/data       # Cookies (persistência de sessão)
+    restart: unless-stopped
+    # Padrão: sobe a interface web
+    command: ["uvicorn", "app.web:app", "--host", "0.0.0.0", "--port", "8000"]

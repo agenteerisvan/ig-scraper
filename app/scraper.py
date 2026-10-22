@@ -73,7 +73,7 @@ async def login_ig(pw) -> BrowserContext:
         viewport={"width": 1366, "height": 900},
         locale="pt-BR",
     )
-    await context.set_default_timeout(PAGE_TIMEOUT)
+    context.set_default_timeout(PAGE_TIMEOUT)
     page = await context.new_page()
 
     logger.info("Navegando para instagram.com/accounts/login...")

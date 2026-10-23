@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IG Follower Scraper</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#0f0f1a; color:#e2e2f0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+.container { width:100%; max-width:560px; }
+.card { background:#1a1a2e; border-radius:16px; padding:28px; margin-bottom:16px; border:1px solid #2a2a4a; }
+h1 { font-size:1.4rem; margin-bottom:4px; }
+.subtitle { color:#8888aa; font-size:.85rem; margin-bottom:20px; }
+label { display:block; font-size:.8rem; color:#aaaacc; margin-bottom:6px; font-weight:500; }
+input { width:100%; padding:12px 14px; background:#0f0f1a; border:1px solid #333355; border-radius:10px; color:#fff; font-size:1rem; margin-bottom:14px; transition:border-color .2s; }
+input:focus { outline:none; border-color:#7c6aff; }
+.row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.row input { margin-bottom:14px; }
+button.main { width:100%; padding:14px; background:linear-gradient(135deg,#7c6aff,#5a4aff); color:#fff; border:none; border-radius:12px; font-size:1.05rem; font-weight:600; cursor:pointer; transition:transform .1s; }
+button.main:hover { transform:scale(1.01); }
+button.main:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+.status { display:none; }
+.status.active { display:block; }
+.badge { display:inline-block; padding:4px 12px; border-radius:20px; font-size:.8rem; font-weight:600; }
+.badge.running { background:#2a2a5a; color:#8888ff; }
+.badge.done { background:#1a3a2a; color:#44dd88; }
+.badge.error { background:#3a1a1a; color:#ff6666; }
+.progress-bar { height:6px; background:#2a2a4a; border-radius:3px; margin:14px 0; overflow:hidden; }
+.progress-fill { height:100%; background:linear-gradient(90deg,#7c6aff,#44dd88); width:0%; transition:width .5s; border-radius:3px; }
+.stats { display:flex; gap:16px; flex-wrap:wrap; margin-top:10px; font-size:.85rem; }
+.stats span { color:#aaaacc; }
+.stats b { color:#fff; }
+.log { background:#0f0f1a; border-radius:10px; padding:14px; margin-top:14px; max-height:180px; overflow-y:auto; font-family:'Courier New',monospace; font-size:.75rem; color:#9999bb; white-space:pre-wrap; line-height:1.5; }
+.error-box { background:#1a0f0f; border:1px solid #ff444433; border-radius:10px; padding:12px; margin-top:10px; font-family:monospace; font-size:.75rem; color:#ff8888; max-height:120px; overflow-y:auto; display:none; white-space:pre-wrap; }
+.error-box.show { display:block; }
+.download-row { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; }
+.btn-dl { flex:1; min-width:140px; padding:12px; border-radius:10px; border:1px solid #333355; background:#0f0f1a; color:#ccccee; font-size:.9rem; cursor:pointer; text-align:center; transition:background .2s; text-decoration:none; }
+.btn-dl:hover { background:#2a2a4a; }
+.btn-dl.highlight { border-color:#44dd8855; color:#44dd88; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <h1>&#128225; IG Follower Scraper</h1>
+    <p class="subtitle">Digite o @ do influencer e extraia nome + telefone + e-mail dos seguidores.</p>
+    <form id="scrapeForm">
+      <label>@ do Influencer</label>
+      <input type="text" id="username" placeholder="ex: heelder_" required autocomplete="off">
+      <div class="row">
+        <div>
+          <label>Max. seguidores (vazio = todos)</label>
+          <input type="number" id="max_followers" placeholder="todos" min="0">
+        </div>
+        <div>
+          <label>Pausa (seg)</label>
+          <input type="number" id="delay" value="3" min="1" max="10" step="0.5">
+        </div>
+      </div>
+      <label>Código de verificação (só 1º login)</label>
+      <input type="text" id="challenge_code" placeholder="Código p/ celular (deixe vazio se não pedir)">
+      <button type="submit" class="main" id="btnStart">Iniciar Extração</button>
+    </form>
+  </div>
+
+  <div class="card status" id="statusCard">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span class="badge running" id="statusBadge">INICIANDO</span>
+      <span id="progressPct">0%</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="stats">
+      <span>&#128222; Telefones: <b id="statPhones">0</b></span>
+      <span>&#9993; E-mails: <b id="statEmails">0</b></span>
+      <span>&#128274; Privados: <b id="statPrivates">0</b></span>
+      <span>&#9201; Tempo: <b id="statTime">0s</b></span>
+    </div>
+    <div class="log" id="logBox"></div>
+    <div class="error-box" id="errorBox"></div>
+    <div class="download-row" id="downloadRow" style="display:none;">
+      <a class="btn-dl" id="dlFull" href="#">&#11015; CSV Completo</a>
+      <a class="btn-dl highlight" id="dlContacts" href="#">&#128222; S/ Contatos</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const form = document.getElementById('scrapeForm');
+const statusCard = document.getElementById('statusCard');
+let pollTimer = null;
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const username = document.getElementById('username').value.trim();
+  const max_followers = document.getElementById('max_followers').value || 0;
+  const delay = parseFloat(document.getElementById('delay').value) || 3;
+  const challenge_code = document.getElementById('challenge_code').value.trim();
+
+  document.getElementById('btnStart').disabled = true;
+  statusCard.classList.add('active');
+  resetUI();
+
+  try {
+    const resp = await fetch('/api/scrape', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username, max_followers, delay, challenge_code})
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Erro ao iniciar');
+    pollStatus(data.job_id);
+  } catch(err) {
+    showError(err.message);
+  }
+});
+
+function pollStatus(jobId) {
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/status/${jobId}`);
+      const s = await r.json();
+      updateUI(s);
+      if (s.status === 'done') {
+        clearInterval(pollTimer);
+        document.getElementById('btnStart').disabled = false;
+        document.getElementById('downloadRow').style.display = 'flex';
+        document.getElementById('dlFull').href = `/api/download/${jobId}?file=${s.csv||''}`;
+        document.getElementById('dlContacts').href = `/api/download/${jobId}?file=${s.csv_contact||''}`;
+      } else if (s.status === 'error') {
+        clearInterval(pollTimer);
+        document.getElementById('btnStart').disabled = false;
+        showError(s.error, s.log_last_traceback);
+      }
+    } catch(e) {}
+  }, 2000);
+}
+
+function updateUI(s) {
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = s.status === 'running' ? s.message : (s.status === 'done' ? 'CONCLUIDO' : 'ERRO');
+  badge.className = 'badge ' + (s.status === 'done' ? 'done' : s.status === 'error' ? 'error' : 'running');
+
+  const pct = s.total > 0 ? Math.round((s.progress / s.total) * 100) : 0;
+  document.getElementById('progressPct').textContent = pct + '%';
+  document.getElementById('progressFill').style.width = pct + '%';
+
+  document.getElementById('statPhones').textContent = s.phones || 0;
+  document.getElementById('statEmails').textContent = s.emails || 0;
+  document.getElementById('statPrivates').textContent = s.privates || 0;
+  document.getElementById('statTime').textContent = (s.elapsed || 0) + 's';
+  document.getElementById('logBox').textContent = s.log || '';
+  document.getElementById('logBox').scrollTop = 99999;
+}
+
+function showError(msg, tb) {
+  const box = document.getElementById('errorBox');
+  let text = msg || 'Erro desconhecido';
+  if (tb && tb.length) text += '\n' + tb.join('\n');
+  box.textContent = text;
+  box.classList.add('show');
+}
+
+function resetUI() {
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('progressPct').textContent = '0%';
+  document.getElementById('statPhones').textContent = '0';
+  document.getElementById('statEmails').textContent = '0';
+  document.getElementById('statPrivates').textContent = '0';
+  document.getElementById('statTime').textContent = '0s';
+  document.getElementById('logBox').textContent = '';
+  document.getElementById('errorBox').classList.remove('show');
+  document.getElementById('downloadRow').style.display = 'none';
+}
+</script>
+</body>
+</html>
